@@ -2,10 +2,7 @@
 
 A 3D N-body gravitational simulation built to explore CPU and GPU parallel programming. Particles interact through Newtonian gravity using algorithms ranging from brute-force O(n²) to Barnes-Hut O(n log n), with an OpenGL renderer that includes bloom post-processing.
 
-![Simulation Showcase](media/overview.gif)
-
-![Overview](media/37000.gif)
-![Overview](media/system.png)
+![Simulation Screenshot](media/system.png)
 
 ## How it works
 
