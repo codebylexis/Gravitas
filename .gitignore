@@ -18,5 +18,9 @@ CMakeFiles/
 cmake_install.cmake
 Makefile
 build/
+compile_commands.json
+
+# macOS
+.DS_Store
 
 perf.*
