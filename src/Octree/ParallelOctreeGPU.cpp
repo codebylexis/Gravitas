@@ -1,3 +1,16 @@
+// GPU octree build for the Barnes-Hut solver.
+//
+// Mirrors the two-tier design of ParallelOctreeCPU — a shallow father tree whose
+// deepest level defines the tasks, plus one independent subtree per task — but every
+// phase is a compute shader dispatch. All state lives in SSBOs and never leaves the
+// GPU; the CPU only decides dispatch sizes and sets uniforms.
+//
+// A frame runs: bounding box (parallel reduction) → expand father tree level by level
+// → count particles per task → prefix sum to get each task's slice → scatter particle
+// indices → insert into subtrees → propagate masses upward → prune empty nodes.
+// Every dispatch is followed by a memory barrier, since each phase reads what the
+// previous one wrote.
+
 #include "ParallelOctreeGPU.h"
 #include <omp.h>
 #include <iostream>
@@ -5,16 +18,19 @@
 #include "Helpers.h"
 #include <algorithm>    // std::sort
 using helpers::log;
-using helpers::ipow; 
+using helpers::ipow;
 
 ParallelOctreeGPU::ParallelOctreeGPU(const int n){
     this->totalParticles = n;
 
-	initComputeShaders();   
+	initComputeShaders();
 
     this->maxDepth = -1;
     this->fatherMaxNodes = 0;
-    
+
+    // Deepen the father tree until a level has fewer than ~2 particles per cell,
+    // which is the point where extra depth stops buying parallelism. Capped at 8
+    // levels to bound the node arena.
     int i = 0;
     while (maxDepth < 8) {
         const int tmp = fatherMaxNodes + ipow(8, i);
@@ -36,6 +52,10 @@ ParallelOctreeGPU::ParallelOctreeGPU(const int n){
 
 }
 
+/**
+ * Compiles every compute shader used by the build, one per phase of the pipeline.
+ * Paths are relative to the build directory (out-of-source cmake build assumed).
+ */
 void ParallelOctreeGPU::initComputeShaders() {
     this->expander = std::make_unique<ComputeShader>(std::string("../src/shaders/ComputeShaders/expandOctree.glsl"));
     this->inserter = std::make_unique<ComputeShader>(std::string("../src/shaders/ComputeShaders/insertParticles.glsl"));
@@ -53,7 +73,15 @@ void ParallelOctreeGPU::initComputeShaders() {
     
 }
 
+/**
+ * Allocates the shader storage buffers backing the tree. The binding point passed to
+ * each createBufferData call must match the layout(binding = N) declared in the shaders.
+ * @param n number of particles
+ */
 void ParallelOctreeGPU::initSSBOs(const int n) {
+    // The bounding-box reduction writes one min/max pair per work group, so the
+    // intermediate buffers only need ceil(n / blockSize) entries. Two of them are
+    // used ping-pong style as the reduction repeatedly halves the item count.
     const int blockSizeForReduction = 1024;
 	intermediateBoundsBufferA.createBufferData(sizeof(glm::vec4) * ((static_cast<unsigned long long>(n) + blockSizeForReduction-1) / blockSizeForReduction) * 2, nullptr, 6, GL_DYNAMIC_DRAW);
     intermediateBoundsBufferB.createBufferData(sizeof(glm::vec4) * ((static_cast<unsigned long long>(n) + blockSizeForReduction-1) / blockSizeForReduction) * 2, nullptr, 7, GL_DYNAMIC_DRAW);
@@ -85,6 +113,8 @@ void ParallelOctreeGPU::computeBoundingBox(ParticleSystem *p) {
     glDispatchCompute(totalWorkGroups, 1, 1);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 
+    // Repeatedly reduce the per-work-group results until a single pair remains,
+    // swapping read and write buffers each round
     GLuint currentNumItems = totalWorkGroups;
     OpenGLBuffer* readBuffer = &intermediateBoundsBufferA;
     OpenGLBuffer* writeBuffer = &intermediateBoundsBufferB;
@@ -216,8 +246,12 @@ void ParallelOctreeGPU::prepareTasks(ParticleSystem* p) {
 
 }
 
+/**
+ * Builds every subtree in one dispatch: one thread per task inserts that task's
+ * particles into its own arena, so no two threads ever touch the same node.
+ */
 void ParallelOctreeGPU::executeTasks() {
-    
+
     inserter->use();
     inserter->setInt("totalTasks", totalTasks);
     inserter->setInt("fatherTreeTotalNodes", fatherMaxNodes);
@@ -235,27 +269,27 @@ void ParallelOctreeGPU::insert(ParticleSystem* p) {
 
     this->prepareTasks(p);
 
-	
     this->executeTasks();
 
-    
     this->propagate();
-    
 
-
-    this->prune(); 
+    this->prune();
 
 }
 
 
+/**
+ * Rewires the tree so empty nodes are skipped during the force walk: occupied
+ * children are chained through their `next` links and parents point at the first
+ * occupied one. Done level by level, top-down, because a level's links depend on
+ * the level above having been fixed up first.
+ */
 void ParallelOctreeGPU::prune() {
     // Prune the father octree first
     int level = 0;
     int left = 0;
     int right = ipow(8, level);
-    int processedNumNodes = ipow(8, level);
 
-	
     while (level < maxDepth) {
         pruneFather->use();
         pruneFather->setInt("left", left);
@@ -279,9 +313,14 @@ void ParallelOctreeGPU::prune() {
 }
 
 
+/**
+ * Rolls mass and center of mass up the father tree so each internal node summarizes
+ * the cluster below it. Runs bottom-up one level per dispatch: a whole level can be
+ * done in parallel, but a level must finish before its parents read it.
+ */
 void ParallelOctreeGPU::propagate() {
     // Propagate
-    int level = maxDepth - 1; 
+    int level = maxDepth - 1;
     int right = parentCount;
     int processedNumNodes = ipow(8, level);
 

@@ -1,3 +1,10 @@
+// Storage for the particle state, laid out as a struct-of-arrays.
+//
+// Positions, velocities, accelerations, masses and forces each live in their own
+// contiguous array rather than being interleaved per particle. Solvers usually touch
+// one attribute at a time, so this keeps their reads sequential, and each array maps
+// directly onto an SSBO the shaders can consume without any repacking.
+
 #include "ParticleSystem.h"
 #include "Helpers.h"
 #include <algorithm>
@@ -47,6 +54,10 @@ ParticleSystem::ParticleSystem(ParticleSystem * other) {
 }
 
 
+/**
+ * Picks a buffer strategy based on where the solver runs.
+ * GPU solvers keep their data device-side; CPU solvers need host-visible memory.
+ */
 void ParticleSystem::createBuffers(bool usesGPU) {
     if (usesGPU) {
         this->configureGpuBuffers();
@@ -56,9 +67,13 @@ void ParticleSystem::createBuffers(bool usesGPU) {
     }
 }
 
+/**
+ * Rounds up to the next power of two by smearing the highest set bit down across
+ * all lower bits, then incrementing. Needed because bitonic sort only works on
+ * power-of-two sized inputs.
+ */
 unsigned int ParticleSystem::nextPowerOfTwo(unsigned int n){
     if (n == 0) return 1; // Or handle as needed
-    // Simple bit manipulation method 
     n--;
     n |= n >> 1;
     n |= n >> 2;
@@ -70,6 +85,10 @@ unsigned int ParticleSystem::nextPowerOfTwo(unsigned int n){
 
 }
 
+/**
+ * Uploads particle state to device-local buffers. Nothing is host-mapped: GPU solvers
+ * read and write these in place, and the renderer draws from the same positions SSBO.
+ */
 void ParticleSystem::configureGpuBuffers() {
 	this->paddedNumParticles = nextPowerOfTwo(this->numParticles);
     positions_SSBO.createBufferData(sizeof(glm::vec4) * this->size(), this->getPositions(), 0, GL_DYNAMIC_COPY);
@@ -83,7 +102,10 @@ void ParticleSystem::configureGpuBuffers() {
 }
 
 /**
- * Creates persistent mapped shader storage buffer objects
+ * Creates persistent mapped shader storage buffer objects.
+ * The mapping stays valid for the lifetime of the buffer, so a CPU solver can write
+ * straight into memory the renderer reads — no per-frame upload or re-mapping.
+ * COHERENT makes those writes visible to the GPU without an explicit flush.
  */
 void ParticleSystem::configureCpuBuffers() {
     GLbitfield bufferStorageFlags = GL_MAP_READ_BIT | GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT;
@@ -104,14 +126,14 @@ void ParticleSystem::configureCpuBuffers() {
 // Sort the particles in the GPU using the z-order curve
 // Why? Improve cache locality, memory access patterns and reduce warp divergence
 void ParticleSystem::gpuSort() {
+	// Rearranging is a scatter, so it can't be done in place. Alternate between the
+	// real buffers and the copies each call instead of copying back every frame.
 	static bool pingPong = true;
 
 	OpenGLBuffer* readPositions = pingPong ? &positions_SSBO : &positionsCopy;
 	OpenGLBuffer* readVelocities = pingPong ? &velocities_SSBO : &velocitiesCopy;
 	OpenGLBuffer* writePositions = pingPong ? &positionsCopy : &positions_SSBO;
 	OpenGLBuffer* writeVelocities = pingPong ? &velocitiesCopy : &velocities_SSBO;
-    
-
 
     // Calculate morton codes
     mortonShader->use();
@@ -162,21 +184,18 @@ void ParticleSystem::gpuSort() {
 	glDispatchCompute((this->numParticles + 256 - 1) / 256, 1, 1);
 	glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 
+	// Swap roles: the buffers just written become the canonical ones at bindings 0/1,
+	// so the rest of the frame reads sorted data without knowing a sort happened.
 	pingPong = !pingPong;
 	writePositions->bindBufferBase(0);
 	writeVelocities->bindBufferBase(1);
 	readPositions->bindBufferBase(17);
-	readVelocities->bindBufferBase(18); 
-            
+	readVelocities->bindBufferBase(18);
 }
 
 
-
-
-
-
-
-
+// Setters take ownership of the incoming array and free the one they replace.
+// Used when swapping heap arrays for persistently mapped buffer memory.
 void ParticleSystem::setAccelerations(glm::vec4 *newAccelerations) {
     delete [] this->accelerations;
     this->accelerations = newAccelerations;

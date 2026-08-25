@@ -38,7 +38,7 @@ int main(int argc, char *argv[])
     glm::vec2 windowDim(1300, 750);
     Window window(windowDim, "Gravitas");
 
-    // Second arg: enable VSync; third arg: enable bloom post-processing
+    // Second arg: print FPS stats; third arg: enable VSync
     RenderLoop renderLoop(window, true, true);
 
     // --- Particle initializer selection ---

@@ -1,3 +1,6 @@
+// Owns the main loop: advance the simulation, draw, present, handle input.
+// Simulation and rendering are deliberately decoupled — the physics step is skipped
+// while paused, but drawing continues so the camera stays interactive.
 
 #include "RenderLoop.h"
 
@@ -13,8 +16,11 @@ void RenderLoop::runLoop(std::shared_ptr<ParticleSimulation> particleSimulation)
 
     while (!glfwWindowShouldClose(this->window.getWindow()))
     {
+        // Updates delta time and the FPS counter in the window title
         this->renderTimer.updateTime(this->window, this->pauseSimulation);
 
+        // One physics step per frame. The simulation starts paused so the initial
+        // particle configuration can be inspected before it evolves.
         if(!this->pauseSimulation){
             particleSimulation->update();
         }

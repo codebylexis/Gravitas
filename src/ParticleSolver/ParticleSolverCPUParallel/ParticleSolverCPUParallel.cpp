@@ -1,3 +1,6 @@
+// Brute-force (particle-particle) CPU solver, parallelized with OpenMP.
+// Every particle is compared against every other one, so the cost is O(n^2) per
+// frame. This is the accuracy reference the Barnes-Hut solvers are checked against.
 
 #include "ParticleSolverCPUParallel.h"
 #include <omp.h>
@@ -11,6 +14,8 @@ ParticleSolverCPUParallel::ParticleSolverCPUParallel(float stepSize, float squar
 
 void ParticleSolverCPUParallel::updateParticlePositions(ParticleSystem *particles){
 
+    // Every particle costs the same n-1 interactions, so a static split balances evenly.
+    // Forces must be fully computed before any position moves, hence the two separate loops.
     #pragma omp parallel for schedule(static) shared(particles)
     for(size_t i =  0; i < particles->size(); i++){
         this->computeGravityForce(particles, i);
@@ -23,6 +28,9 @@ void ParticleSolverCPUParallel::updateParticlePositions(ParticleSystem *particle
 }
 
 
+// Accumulates the gravitational pull of every other particle on `particleId`.
+// Uses Plummer softening: the (r^2 + eps^2)^1.5 denominator keeps the force finite
+// when two particles get arbitrarily close, which would otherwise blow up the integrator.
 void
 ParticleSolverCPUParallel::computeGravityForce(ParticleSystem *particles, const unsigned int particleId) {
     glm::vec4 particlePosition = particles->getPositions()[particleId];
