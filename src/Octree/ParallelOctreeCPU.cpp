@@ -96,7 +96,9 @@ void ParallelOctreeCPU::reset(ParticleSystem *p) {
     float min_x = std::numeric_limits<float>::max();
     float min_y = min_x;
     float min_z = min_x;
-    float max_x = std::numeric_limits<float>::min();
+    // lowest(), not min(): min() is the smallest positive normal value, which would
+    // leave the maximum stuck near zero if every particle sat on the negative side
+    float max_x = std::numeric_limits<float>::lowest();
     float max_y = max_x;
     float max_z = max_x;
 
